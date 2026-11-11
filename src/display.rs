@@ -570,6 +570,21 @@ impl Canvas<'_> {
         self.mark(y, y + height);
     }
 
+    /// Restores an area of the frame buffer from a full-frame base buffer
+    /// with the same layout (what the frame looked like before animation).
+    pub fn restore(&mut self, base: &[u8], x: usize, y: usize, w: usize, h: usize) {
+        if base.len() < FRAME_BYTES || x >= WIDTH || y >= HEIGHT {
+            return;
+        }
+        let w = w.min(WIDTH - x);
+        let h = h.min(HEIGHT - y);
+        for row in 0..h {
+            let off = ((y + row) * WIDTH + x) * 2;
+            self.buf[off..off + w * 2].copy_from_slice(&base[off..off + w * 2]);
+        }
+        self.mark(y, y + h);
+    }
+
     #[inline]
     fn put(&mut self, x: usize, y: usize, raw: u16) {
         let i = (y * WIDTH + x) * 2;

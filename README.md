@@ -92,6 +92,13 @@ Panel timing is Espressif's `SUB_BOARD3_800_480_PANEL_35HZ_RGB_TIMING`
   `precipitation`, `uv_index`; city → lat/lon via the geocoding API.
 - `src/advice.rs` — outfit/rain/snow/UV rules from the project plan.
 - `src/ui.rs` — screen layout with `embedded-graphics`.
+- `src/scene.rs` — animated weather backdrop (phone-weather-app style): a static
+  scene (sky gradient, sun/moon/stars/clouds, text panel) rendered once into a
+  second PSRAM "base" buffer, plus a light particle layer animated on top at
+  ~14 fps — rain streaks (drizzle → storm), drifting snow, and lightning in
+  thunderstorms. Day/night scenery follows the API's `is_day`. Particles only
+  touch small cells per tick and are restored from the base copy, so the
+  continuous LCD scan-out (see `src/display.rs`) keeps its PSRAM bandwidth.
 
 Unit tests for parsing, advice bands and formatting run on the host:
 

@@ -13,7 +13,7 @@ use embassy_net::{
     dns::DnsSocket,
     tcp::client::{TcpClient, TcpClientState},
 };
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use esp_backtrace as _;
 use esp_hal::{
     clock::CpuClock,
@@ -28,7 +28,7 @@ use esp_radio::wifi::{
 };
 use reqwless::client::HttpClient;
 use reqwless::request::{Method, RequestBuilder};
-use weather_advisor::{display, lcd_pins, ui, weather};
+use weather_advisor::{display, lcd_pins, scene, weather};
 
 extern crate alloc;
 
@@ -59,7 +59,6 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// Internal heap size; the Wi-Fi driver needs about 60 KiB of internal RAM
 /// (same value as the reference Wi-Fi demo).
 const INTERNAL_HEAP: usize = 96 * 1024;
-
 macro_rules! mk_static {
     ($t:ty, $val:expr) => {{
         static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
@@ -81,8 +80,15 @@ async fn main(spawner: Spawner) -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0);
 
-    // --- Display: map PSRAM, reserve the frame buffer, hand the pins over ---
-    let framebuffer = psram_split(peripherals.PSRAM, display::FRAME_BYTES);
+    // --- Display: map PSRAM, reserve the frame + scene base buffers ---
+    let mut base;
+    let framebuffer;
+    {
+        let (fb, scene_base) = psram_split(peripherals.PSRAM, display::FRAME_BYTES);
+        framebuffer = fb;
+        base = scene_base;
+    }
+    let rng = esp_hal::rng::Rng::new();
     let mut display = match display::Display::new(
         peripherals.LCD_CAM,
         peripherals.DMA_AXI_CH0,
@@ -99,8 +105,12 @@ async fn main(spawner: Spawner) -> ! {
     };
 
     {
-        let mut canvas = display.canvas();
-        ui::draw_boot(&mut canvas, CITY, "Starting up...");
+        let mut scene = scene::Scene::new(None, &mut base, rng.random());
+        scene.draw(
+            &mut display,
+            CITY,
+            scene::Overlay::Message("Starting up..."),
+        );
     }
     let _ = display.present().await;
 
@@ -122,7 +132,6 @@ async fn main(spawner: Spawner) -> ! {
     // Board always on: keep the radio fully powered.
     controller.set_power_saving(PowerSaveMode::None).unwrap();
 
-    let rng = esp_hal::rng::Rng::new();
     let seed = (rng.random() as u64) << 32 | rng.random() as u64;
     let (stack, runner) = embassy_net::new(
         wifi_interface,
@@ -135,7 +144,6 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(net_task(runner).unwrap());
 
     stack.wait_config_up().await;
-    log::info!("Network up");
     log::info!("Network up");
 
     // --- Refresh loop: fetch + draw, retry on failure, repeat forever ---
@@ -168,18 +176,17 @@ async fn main(spawner: Spawner) -> ! {
                     w.precip_tenths as f32 / 10.0,
                     w.uv_tenths as f32 / 10.0
                 );
-                {
-                    let mut canvas = display.canvas();
-                    ui::draw_weather(&mut canvas, CITY, &w);
-                }
+                let mut scene = scene::Scene::new(Some(&w), &mut base, rng.random());
+                scene.draw(&mut display, CITY, scene::Overlay::Weather(&w));
                 let _ = display.present().await;
-                Timer::after(REFRESH_PERIOD).await;
+                animate_for(&mut display, &mut scene, REFRESH_PERIOD).await;
             }
             Ok(Err(e)) => {
-                show_failure(&mut display, &format!("Fetch failed: {e:?}")).await;
+                show_failure(&mut display, &mut base, rng.random(), &format!("Fetch failed: {e:?}"))
+                    .await;
             }
             Err(_) => {
-                show_failure(&mut display, "Request timed out").await;
+                show_failure(&mut display, &mut base, rng.random(), "Request timed out").await;
             }
         }
     }
@@ -191,14 +198,37 @@ enum Step {
     Weather(weather::Weather),
 }
 
-/// Waits for VSYNC, then draws the failure screen (so partial draws never
-/// become visible), then waits out the retry period.
-async fn show_failure(display: &mut display::Display<'_>, message: &str) {
-    log::warn!("{message}");
-    {
-        let mut canvas = display.canvas();
-        ui::draw_error(&mut canvas, CITY, message);
+/// Animates the scene (rain/snow/lightning) until `total` has elapsed, then
+/// returns so the caller can refresh the weather.
+async fn animate_for(
+    display: &mut display::Display<'_>,
+    scene: &mut scene::Scene<'_>,
+    total: Duration,
+) {
+    let deadline = Instant::now() + total;
+    while Instant::now() < deadline {
+        if scene.animated() {
+            {
+                let mut canvas = display.canvas();
+                scene.tick(&mut canvas);
+            }
+            let _ = display.present().await;
+        }
+        Timer::after(scene::TICK).await;
     }
+}
+
+/// Draws the failure scene (so partial draws never become visible), then
+/// waits out the retry period.
+async fn show_failure(
+    display: &mut display::Display<'_>,
+    base: &mut &'static mut [u8],
+    seed: u32,
+    message: &str,
+) {
+    log::warn!("{message}");
+    let mut scene = scene::Scene::error(base, seed);
+    scene.draw(display, CITY, scene::Overlay::Message(message));
     let _ = display.present().await;
     Timer::after(RETRY_PERIOD).await;
 }
@@ -250,27 +280,31 @@ async fn http_get(
     Ok(alloc::vec::Vec::from(body))
 }
 
-/// Maps the 16 MB PSRAM and hands the first `reserve` bytes (rounded up to a
-/// 64-byte cache line) to the caller as the LCD frame buffer; the rest goes to
-/// the esp-alloc heap. Copied from the reference board library
+/// Maps the 16 MB PSRAM and splits it into the LCD frame buffer and a second
+/// full-frame "base" buffer for scene animation; the rest goes to the
+/// esp-alloc heap. Copied from the reference board library
 /// (`esp32-s31-korvo/src/board.rs`).
-fn psram_split(psram: PSRAM<'static>, reserve: usize) -> &'static mut [u8] {
+fn psram_split(
+    psram: PSRAM<'static>,
+    frame_bytes: usize,
+) -> (&'static mut [u8], &'static mut [u8]) {
     let psram = Psram::new(psram, Default::default());
     let (start, size) = psram.raw_parts();
-    let reserve = reserve.next_multiple_of(64).min(size);
+    let total = (2 * frame_bytes).next_multiple_of(64).min(size);
 
     // SAFETY: the PSRAM mapping is valid for `size` bytes for the rest of the
     // program, nothing else uses it, and the heap only gets the part after
-    // `reserve`.
+    // `total`.
     unsafe {
-        if size > reserve {
+        if size > total {
             esp_alloc::HEAP.add_region(esp_alloc::HeapRegion::new(
-                start.add(reserve),
-                size - reserve,
+                start.add(total),
+                size - total,
                 esp_alloc::MemoryCapability::External.into(),
             ));
         }
-        core::slice::from_raw_parts_mut(start, reserve)
+        let all = core::slice::from_raw_parts_mut(start, total);
+        all.split_at_mut(frame_bytes)
     }
 }
 

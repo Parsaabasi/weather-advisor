@@ -41,6 +41,21 @@ pub fn draw_boot<C: DrawTarget<Color = Rgb565>>(
     message: &str,
 ) {
     draw_common(canvas, city);
+    draw_boot_message(canvas, message);
+}
+
+/// Draws the error/retry screen.
+pub fn draw_error<C: DrawTarget<Color = Rgb565>>(
+    canvas: &mut C,
+    city: &str,
+    message: &str,
+) {
+    draw_common(canvas, city);
+    draw_error_texts(canvas, message);
+}
+
+/// Centered status message used by the boot screen.
+pub fn draw_boot_message<C: DrawTarget<Color = Rgb565>>(canvas: &mut C, message: &str) {
     Text::with_alignment(
         message,
         Point::new(PANEL_WIDTH as i32 / 2, 140),
@@ -51,13 +66,8 @@ pub fn draw_boot<C: DrawTarget<Color = Rgb565>>(
     .ok();
 }
 
-/// Draws the error/retry screen.
-pub fn draw_error<C: DrawTarget<Color = Rgb565>>(
-    canvas: &mut C,
-    city: &str,
-    message: &str,
-) {
-    draw_common(canvas, city);
+/// Error headline, detail and retry note, centered.
+pub fn draw_error_texts<C: DrawTarget<Color = Rgb565>>(canvas: &mut C, message: &str) {
     Text::with_alignment(
         "Connection problem",
         Point::new(PANEL_WIDTH as i32 / 2, 120),
@@ -91,7 +101,14 @@ pub fn draw_weather<C: DrawTarget<Color = Rgb565>>(
     weather: &Weather,
 ) {
     draw_common(canvas, city);
+    draw_weather_content(canvas, weather);
+}
 
+/// Weather and advice lines, over an existing background.
+pub fn draw_weather_content<C: DrawTarget<Color = Rgb565>>(
+    canvas: &mut C,
+    weather: &Weather,
+) {
     let x = 20;
     let mut y = 100;
 
@@ -183,6 +200,11 @@ fn draw_common<C: DrawTarget<Color = Rgb565>>(canvas: &mut C, city: &str) {
         .into_styled(PrimitiveStyle::with_fill(BACKGROUND))
         .draw(canvas)
         .ok();
+    draw_panel(canvas, city);
+}
+
+/// Header bar and outlined content panel, over an existing background.
+pub fn draw_panel<C: DrawTarget<Color = Rgb565>>(canvas: &mut C, city: &str) {
     Rectangle::new(Point::zero(), Size::new(PANEL_WIDTH, 48))
         .into_styled(PrimitiveStyle::with_fill(HEADER))
         .draw(canvas)
@@ -255,6 +277,7 @@ mod tests {
             code,
             precip_tenths: precip,
             uv_tenths: uv,
+            is_day: true,
         }
     }
 

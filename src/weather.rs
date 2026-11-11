@@ -19,6 +19,8 @@ pub struct Weather {
     pub precip_tenths: u16,
     /// UV index, in tenths.
     pub uv_tenths: u16,
+    /// Daylight flag from the API (drives day/night scenery).
+    pub is_day: bool,
 }
 
 /// Coordinates resolved from a city name, in millionths of a degree.
@@ -60,7 +62,7 @@ pub fn forecast_url(location: Location) -> heapless::String<192> {
     let mut url = heapless::String::new();
     let _ = core::write!(
         url,
-        "http://api.open-meteo.com/v1/forecast?latitude={}.{:03}&longitude={}.{:03}&current=temperature_2m,weather_code,precipitation,uv_index",
+        "http://api.open-meteo.com/v1/forecast?latitude={}.{:03}&longitude={}.{:03}&current=temperature_2m,weather_code,precipitation,uv_index,is_day",
         location.lat_micro / 1_000_000,
         (location.lat_micro % 1_000_000).unsigned_abs(),
         location.lon_micro / 1_000_000,
@@ -87,11 +89,15 @@ pub fn parse_forecast(body: &str) -> Option<Weather> {
     let code = parse_number_after(find(current, "\"weather_code\":")?)?;
     let precip = parse_number_after(find(current, "\"precipitation\":")?)?;
     let uv = parse_number_after(find(current, "\"uv_index\":")?)?;
+    let is_day = find(current, "\"is_day\":")
+        .map(|rest| rest.trim_start().starts_with('1'))
+        .unwrap_or(true);
     Some(Weather {
         temp_tenths: (temp * 10.0) as i16,
         code: code as u16,
         precip_tenths: (precip * 10.0) as u16,
         uv_tenths: (uv * 10.0) as u16,
+        is_day,
     })
 }
 
@@ -152,12 +158,13 @@ mod tests {
 
     #[test]
     fn parses_forecast() {
-        let body = r#"{"latitude":49.19,"current_units":{"temperature_2m":"°C"},"current":{"time":"2026-11-11T13:00","interval":900,"temperature_2m":5.1,"weather_code":3,"precipitation":0.00,"uv_index":0.25}}"#;
+        let body = r#"{"latitude":49.19,"current_units":{"temperature_2m":"°C"},"current":{"time":"2026-11-11T13:00","interval":900,"temperature_2m":5.1,"weather_code":3,"precipitation":0.00,"uv_index":0.25,"is_day":1}}"#;
         let w = parse_forecast(body).unwrap();
         assert_eq!(w.temp_tenths, 51);
         assert_eq!(w.code, 3);
         assert_eq!(w.precip_tenths, 0);
         assert_eq!(w.uv_tenths, 2);
+        assert!(w.is_day);
     }
 
     #[test]

@@ -58,6 +58,7 @@ mod tests {
             code,
             precip_tenths: precip,
             uv_tenths: uv,
+            is_day: true,
         }
     }
 
