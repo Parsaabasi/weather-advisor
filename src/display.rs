@@ -600,10 +600,16 @@ impl<'d> Display<'d> {
                 Ok(())
             }
             Err((e, dpi, ring)) => {
+                log::error!("display: stream start failed: {e:?}");
                 self.scanout = Scanout::Idle(dpi, ring);
                 Err(DisplayError::Dma(e))
             }
         }
+    }
+
+    /// Debug: the current DMA ring position and the aligned reference.
+    pub fn debug_pos(&self) -> (usize, Option<usize>) {
+        (self.dma_descriptor_index(), self.reference)
     }
 }
 

@@ -200,21 +200,24 @@ enum Step {
 
 /// Animates the scene (rain/snow/lightning) until `total` has elapsed, then
 /// returns so the caller can refresh the weather.
+///
+/// `present()` runs on EVERY frame (VSYNC-paced), as the display driver's
+/// drift detection expects; the scene is ticked only on every third frame
+/// (~12 fps) to keep the per-tick PSRAM traffic inside the blanking window.
 async fn animate_for(
     display: &mut display::Display<'_>,
     scene: &mut scene::Scene<'_>,
     total: Duration,
 ) {
     let deadline = Instant::now() + total;
+    let mut frames: u32 = 0;
     while Instant::now() < deadline {
-        if scene.animated() {
-            {
-                let mut canvas = display.canvas();
-                scene.tick(&mut canvas);
-            }
-            let _ = display.present().await;
+        frames += 1;
+        if scene.animated() && frames % 3 == 0 {
+            let mut canvas = display.canvas();
+            scene.tick(&mut canvas);
         }
-        Timer::after(scene::TICK).await;
+        let _ = display.present().await;
     }
 }
 

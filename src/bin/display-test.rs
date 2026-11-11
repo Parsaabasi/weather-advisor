@@ -62,16 +62,27 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let _ = display.present().await;
 
     let mut beats = 0u32;
+    let mut frames = 0u32;
     loop {
-        Timer::after_millis(80).await;
-        {
+        frames += 1;
+        // Tick the scene on every third VSYNC (~12 fps); present every frame,
+        // as the driver's drift detection expects VSYNC-paced calls.
+        if frames % 3 == 0 {
             let mut canvas = display.canvas();
             scene.tick(&mut canvas);
         }
-        let _ = display.present().await;
-        beats += 1;
-        if beats % 125 == 0 {
-            println!("heartbeat {} (10 s of animation)", beats / 125);
+        let result = display.present().await;
+        beats = frames / 105;
+        match result {
+            Ok(()) if frames % 105 == 0 => {
+                let (pos, reference) = display.debug_pos();
+                println!("frame {frames}: present ok, dma pos {pos}, ref {reference:?}");
+            }
+            Err(e) => println!("frame {frames}: present FAILED: {e:?}"),
+            Ok(()) => {}
+        }
+        if frames % 105 == 0 {
+            println!("heartbeat {} (3 s of animation)", beats);
         }
     }
 }
