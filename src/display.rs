@@ -65,6 +65,55 @@ pub const HEIGHT: usize = 480;
 pub const FRAME_BYTES: usize = WIDTH * HEIGHT * 2;
 /// One row in bytes: 1600 = 25 cache lines, so whole rows are cache-aligned.
 const ROW_BYTES: usize = WIDTH * 2;
+/// Dirty-tracking granularity: one 64-byte (32-pixel) cache-line chunk per
+/// row, matching the PSRAM cache-line/DMA alignment on this chip.
+const CHUNK_BYTES: usize = 64;
+const CHUNK_COLS: usize = ROW_BYTES / CHUNK_BYTES;
+const BITMAP_WORDS: usize = (HEIGHT * CHUNK_COLS + 63) / 64;
+
+/// Which 64-byte chunks of the frame buffer changed since the last write-back.
+/// Writing back only touched chunks keeps the PSRAM traffic of small frame
+/// updates (e.g. animation particles) inside the vertical blanking window,
+/// where it cannot compete with the continuous scan-out for bandwidth.
+struct DirtyChunks {
+    bits: [u64; BITMAP_WORDS],
+}
+
+impl DirtyChunks {
+    const fn new() -> Self {
+        Self { bits: [0; BITMAP_WORDS] }
+    }
+
+    /// Marks the rectangle `x, y, w, h` (in pixels, pre-clipping) dirty.
+    fn mark(&mut self, x: usize, y: usize, w: usize, h: usize) {
+        if x >= WIDTH || y >= HEIGHT || w == 0 || h == 0 {
+            return;
+        }
+        let c0 = x / 32;
+        let c1 = (x + w - 1).min(WIDTH - 1) / 32;
+        let r1 = (y + h).min(HEIGHT);
+        for row in y..r1 {
+            for c in c0..=c1 {
+                let i = row * CHUNK_COLS + c;
+                self.bits[i / 64] |= 1u64 << (i % 64);
+            }
+        }
+    }
+
+    fn mark_all(&mut self) {
+        for word in &mut self.bits {
+            *word = u64::MAX;
+        }
+    }
+
+    fn clear(&mut self) {
+        self.bits = [0; BITMAP_WORDS];
+    }
+
+    fn is_empty(&self) -> bool {
+        self.bits.iter().all(|&word| word == 0)
+    }
+}
 
 /// Burst configuration for the frame buffer DMA: 64-byte PSRAM bursts, and
 /// burst mode on for internal RAM, where the descriptors live.
@@ -211,7 +260,7 @@ impl core::fmt::Display for DisplayError {
 impl core::error::Error for DisplayError {}
 
 /// Writes CPU cache lines covering `bytes` back to memory so the DMA sees them.
-fn writeback(bytes: &[u8]) {
+pub fn writeback(bytes: &[u8]) {
     if let Ok(region) = DmaAlignedRef::new(bytes) {
         region.writeback();
     }
@@ -281,8 +330,8 @@ pub struct Display<'d> {
     unreported_resyncs: u32,
     last_drift_log: Instant,
     framebuffer: *mut u8,
-    /// Rows `start..end` written since the last `present`.
-    dirty: Option<(usize, usize)>,
+    /// Chunks of the frame buffer written since the last `present`.
+    dirty: DirtyChunks,
 }
 
 impl<'d> Display<'d> {
@@ -385,20 +434,21 @@ impl<'d> Display<'d> {
             unreported_resyncs: 0,
             last_drift_log: Instant::now(),
             framebuffer,
-            dirty: None,
+            dirty: DirtyChunks::new(),
         })
     }
 
-    fn pixels(&mut self) -> &mut [u8] {
+    fn pixels(&mut self) -> &'static mut [u8] {
         // SAFETY: the buffer is `FRAME_BYTES` long and lives forever. The DMA
         // only reads it, so concurrent CPU writes can at worst show up as
-        // tearing on screen.
+        // tearing on screen. The unbound lifetime decouples callers that touch
+        // other `self` fields (e.g. the dirty map) afterwards.
         unsafe { core::slice::from_raw_parts_mut(self.framebuffer, FRAME_BYTES) }
     }
 
     /// Raw RGB565 little-endian frame buffer. Marks the whole frame as changed.
     pub fn framebuffer(&mut self) -> &mut [u8] {
-        self.dirty = Some((0, HEIGHT));
+        self.dirty.mark_all();
         self.pixels()
     }
 
@@ -467,12 +517,29 @@ impl<'d> Display<'d> {
         Ok(())
     }
 
-    /// Writes the rows touched since the last call back to PSRAM.
+    /// Writes the frame-buffer chunks touched since the last call back to
+    /// PSRAM, then clears the dirty map.
     fn flush_dirty(&mut self) {
-        if let Some((start, end)) = self.dirty.take() {
-            let rows = &self.pixels()[start * ROW_BYTES..end * ROW_BYTES];
-            writeback(rows);
+        if self.dirty.is_empty() {
+            return;
         }
+        let pixels = self.pixels();
+        let chunks = HEIGHT * CHUNK_COLS;
+        for (word_i, word) in self.dirty.bits.iter().enumerate() {
+            let mut word = *word;
+            while word != 0 {
+                let bit = word.trailing_zeros();
+                word &= word - 1;
+                let idx = word_i * 64 + bit as usize;
+                // The bitmap rounds up to whole words; skip padding bits.
+                if idx >= chunks {
+                    continue;
+                }
+                let off = (idx / CHUNK_COLS) * ROW_BYTES + (idx % CHUNK_COLS) * CHUNK_BYTES;
+                writeback(&pixels[off..off + CHUNK_BYTES]);
+            }
+        }
+        self.dirty.clear();
     }
 
     /// Counts a resync and reports at most one summary line per
@@ -541,18 +608,15 @@ impl<'d> Display<'d> {
 }
 
 /// [`DrawTarget`] over an RGB565 little-endian frame buffer that records
-/// which rows it touched.
+/// which 64-byte chunks it touched.
 pub struct Canvas<'a> {
     buf: &'a mut [u8],
-    dirty: &'a mut Option<(usize, usize)>,
+    dirty: &'a mut DirtyChunks,
 }
 
 impl Canvas<'_> {
-    fn mark(&mut self, start: usize, end: usize) {
-        *self.dirty = Some(match *self.dirty {
-            Some((s, e)) => (s.min(start), e.max(end)),
-            None => (start, end),
-        });
+    fn mark(&mut self, x: usize, y: usize, w: usize, h: usize) {
+        self.dirty.mark(x, y, w, h);
     }
 
     /// Copies a `width` x `height` block of RGB565 little-endian pixels
@@ -567,7 +631,7 @@ impl Canvas<'_> {
             let dst = ((y + row) * WIDTH + x) * 2;
             self.buf[dst..dst + row_len].copy_from_slice(src);
         }
-        self.mark(y, y + height);
+        self.mark(x, y, width, height);
     }
 
     /// Restores an area of the frame buffer from a full-frame base buffer
@@ -582,14 +646,14 @@ impl Canvas<'_> {
             let off = ((y + row) * WIDTH + x) * 2;
             self.buf[off..off + w * 2].copy_from_slice(&base[off..off + w * 2]);
         }
-        self.mark(y, y + h);
+        self.mark(x, y, w, h);
     }
 
     #[inline]
     fn put(&mut self, x: usize, y: usize, raw: u16) {
         let i = (y * WIDTH + x) * 2;
         self.buf[i..i + 2].copy_from_slice(&raw.to_le_bytes());
-        self.mark(y, y + 1);
+        self.mark(x, y, 1, 1);
     }
 }
 
@@ -625,8 +689,10 @@ impl DrawTarget for Canvas<'_> {
         };
         let bytes = RawU16::from(color).into_inner().to_le_bytes();
         let (x0, x1) = (area.top_left.x as usize, bottom_right.x as usize);
-        self.mark(area.top_left.y as usize, bottom_right.y as usize + 1);
-        for y in area.top_left.y as usize..=bottom_right.y as usize {
+        let y0 = area.top_left.y as usize;
+        let y1 = bottom_right.y as usize;
+        self.mark(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+        for y in y0..=y1 {
             let row = &mut self.buf[(y * WIDTH + x0) * 2..(y * WIDTH + x1 + 1) * 2];
             for px in row.as_chunks_mut::<2>().0 {
                 *px = bytes;

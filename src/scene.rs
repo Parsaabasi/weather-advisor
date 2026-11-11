@@ -30,8 +30,8 @@ const RAIN_W: usize = 2;
 const RAIN_H: usize = 13;
 /// Snow flake geometry (square side in pixels).
 const SNOW_S: usize = 3;
-/// Animation period; ~14 ticks per second.
-pub const TICK: embassy_time::Duration = embassy_time::Duration::from_millis(70);
+/// Animation period; ~12.5 ticks per second.
+pub const TICK: embassy_time::Duration = embassy_time::Duration::from_millis(80);
 
 /// What goes on top of the panel: a status message or the weather content.
 pub enum Overlay<'x> {
@@ -60,18 +60,18 @@ impl Kind {
     /// Sky gradient: (top, bottom) as (r5, g6, b5) triplets.
     fn sky(self) -> ((u8, u8, u8), (u8, u8, u8)) {
         match self {
-            Kind::Boot => ((10, 14, 24), (14, 20, 28)),
-            Kind::Error => ((5, 8, 14), (10, 14, 20)),
-            Kind::ClearDay => ((6, 22, 31), (13, 44, 44)),
-            Kind::ClearNight => ((0, 3, 8), (2, 7, 14)),
-            Kind::PartlyDay => ((7, 20, 29), (13, 38, 42)),
-            Kind::PartlyNight => ((0, 3, 9), (3, 8, 15)),
-            Kind::Overcast => ((9, 14, 18), (14, 22, 25)),
-            Kind::Fog => ((11, 16, 18), (15, 21, 23)),
-            Kind::LightRain => ((5, 10, 16), (9, 18, 22)),
-            Kind::HeavyRain => ((4, 8, 13), (7, 14, 18)),
-            Kind::Snow => ((14, 26, 30), (19, 36, 35)),
-            Kind::Storm => ((2, 4, 9), (5, 10, 13)),
+            Kind::Boot => ((5, 10, 14), (9, 16, 20)),
+            Kind::Error => ((3, 6, 9), (6, 10, 14)),
+            Kind::ClearDay => ((4, 18, 26), (10, 36, 31)),
+            Kind::ClearNight => ((0, 2, 5), (1, 5, 9)),
+            Kind::PartlyDay => ((5, 16, 24), (10, 30, 30)),
+            Kind::PartlyNight => ((0, 2, 6), (2, 6, 10)),
+            Kind::Overcast => ((6, 10, 13), (10, 16, 17)),
+            Kind::Fog => ((8, 12, 13), (11, 15, 16)),
+            Kind::LightRain => ((3, 7, 11), (6, 13, 15)),
+            Kind::HeavyRain => ((2, 5, 9), (5, 10, 12)),
+            Kind::Snow => ((10, 20, 22), (14, 26, 24)),
+            Kind::Storm => ((1, 3, 6), (3, 7, 9)),
         }
     }
 
@@ -111,7 +111,7 @@ impl Kind {
     /// Particle colour, `None` for static scenes.
     fn particle_color(self) -> Option<Rgb565> {
         match self {
-            Kind::LightRain | Kind::HeavyRain | Kind::Storm => Some(Rgb565::new(18, 44, 40)),
+            Kind::LightRain | Kind::HeavyRain | Kind::Storm => Some(Rgb565::new(20, 48, 28)),
             Kind::Snow => Some(Rgb565::WHITE),
             _ => None,
         }
@@ -179,9 +179,9 @@ impl<'a> Scene<'a> {
             bolt: None,
         };
         let count = match kind.particle_color() {
-            Some(_) if kind == Kind::HeavyRain || kind == Kind::Storm => 90,
-            Some(_) if kind.is_snow() => 64,
-            Some(_) => 56,
+            Some(_) if kind == Kind::HeavyRain || kind == Kind::Storm => 48,
+            Some(_) if kind.is_snow() => 40,
+            Some(_) => 40,
             None => 0,
         };
         for _ in 0..count {
@@ -235,6 +235,9 @@ impl<'a> Scene<'a> {
         }
         let frame = display.framebuffer();
         self.base.copy_from_slice(&frame[..self.base.len()]);
+        // The base is read back later (particle restore) long after the cache
+        // has evicted these lines, so it must be flushed to PSRAM now.
+        crate::display::writeback(self.base);
     }
 
     fn draw_sky(&self, canvas: &mut Canvas<'_>) {
@@ -269,7 +272,7 @@ impl<'a> Scene<'a> {
         if kind.is_night() {
             // Moon: pale disc with an offset bite taken out of it.
             Circle::new(Point::new(650, 100), 32)
-                .into_styled(PrimitiveStyle::with_fill(Rgb565::new(28, 58, 54)))
+                .into_styled(PrimitiveStyle::with_fill(Rgb565::new(28, 60, 24)))
                 .draw(canvas)
                 .ok();
             let (sr, sg, sb) = self.kind.sky().0;
@@ -289,15 +292,15 @@ impl<'a> Scene<'a> {
                 canvas
                     .fill_solid(
                         &Rectangle::new(Point::new(x, y), Size::new(s as u32, s as u32)),
-                        Rgb565::new(24, 56, 52),
+                        Rgb565::new(24, 56, 26),
                     )
                     .ok();
             }
         }
         let cloud_color = if kind.is_night() {
-            Rgb565::new(5, 12, 16)
+            Rgb565::new(4, 9, 12)
         } else {
-            Rgb565::new(17, 34, 38)
+            Rgb565::new(17, 34, 26)
         };
         for i in 0..kind.clouds() {
             let x = 90 + (i as i32) * 190;

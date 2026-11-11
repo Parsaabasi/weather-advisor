@@ -1,15 +1,13 @@
 #![no_std]
 #![no_main]
 
-// Display hardware test: fills the whole panel with a solid colour that
-// changes every two seconds (red, green, blue, white). If the panel shows
-// nothing in this mode, the problem is hardware (power, cable, panel), not
-// the app.
+// Display hardware test: renders a forced storm scene (the heaviest
+// animation load: dense rain + lightning) and animates it forever, printing
+// a heartbeat every 10 s. Purpose: verify on serial that the display driver
+// reports no stream drift under the worst-case animation traffic. If the
+// panel shows nothing in this mode, the problem is hardware (power, cable,
+// panel), not the app.
 
-use embedded_graphics::{
-    pixelcolor::{Rgb565, raw::RawU16},
-    prelude::*,
-};
 use embassy_time::Timer;
 use esp_backtrace as _;
 use esp_hal::{
@@ -19,16 +17,9 @@ use esp_hal::{
     timer::timg::TimerGroup,
 };
 use esp_println::println;
-use weather_advisor::display::Display;
+use weather_advisor::{display, lcd_pins, scene, weather::Weather};
 
 esp_bootloader_esp_idf::esp_app_desc!();
-
-const COLORS: [(u8, u8, u8); 4] = [
-    (31, 0, 0),    // red
-    (0, 63, 0),    // green
-    (0, 0, 31),    // blue
-    (31, 63, 31),  // white
-];
 
 #[esp_rtos::main]
 async fn main(_spawner: embassy_executor::Spawner) -> ! {
@@ -39,12 +30,12 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0);
 
-    let framebuffer = psram_split(peripherals.PSRAM, weather_advisor::display::FRAME_BYTES);
+    let (framebuffer, base) = psram_split(peripherals.PSRAM, display::FRAME_BYTES);
 
-    let mut display = match Display::new(
+    let mut display = match display::Display::new(
         peripherals.LCD_CAM,
         peripherals.DMA_AXI_CH0,
-        weather_advisor::lcd_pins!(peripherals),
+        lcd_pins!(peripherals),
         framebuffer,
     ) {
         Ok(display) => display,
@@ -55,36 +46,55 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
             }
         }
     };
+    println!("display init ok");
 
-    println!("display init ok, cycling colours");
+    // Force the heaviest animated scene (storm: dense rain + lightning).
+    let storm = Weather {
+        temp_tenths: 47,
+        code: 95,
+        precip_tenths: 90,
+        uv_tenths: 0,
+        is_day: true,
+    };
+    let mut scene = scene::Scene::new(Some(&storm), base, 0x1234_5678);
+    scene.draw(&mut display, "TEST", scene::Overlay::Weather(&storm));
+    println!("storm scene drawn, animating");
+    let _ = display.present().await;
+
+    let mut beats = 0u32;
     loop {
-        for color in COLORS {
-            {
-                let raw = RawU16::from(Rgb565::new(color.0, color.1, color.2)).into_inner();
-                let bytes = raw.to_le_bytes();
-                for row in display.framebuffer().chunks_exact_mut(2) {
-                    row.copy_from_slice(&bytes);
-                }
-            }
-            println!("showing colour R{} G{} B{}", color.0, color.1, color.2);
-            let _ = display.present().await;
-            Timer::after_secs(2).await;
+        Timer::after_millis(80).await;
+        {
+            let mut canvas = display.canvas();
+            scene.tick(&mut canvas);
+        }
+        let _ = display.present().await;
+        beats += 1;
+        if beats % 125 == 0 {
+            println!("heartbeat {} (10 s of animation)", beats / 125);
         }
     }
 }
 
-fn psram_split(psram: PSRAM<'static>, reserve: usize) -> &'static mut [u8] {
+/// Maps the 16 MB PSRAM and splits it into the LCD frame buffer and a second
+/// full-frame "base" buffer for scene animation; the rest goes to the
+/// esp-alloc heap.
+fn psram_split(
+    psram: PSRAM<'static>,
+    frame_bytes: usize,
+) -> (&'static mut [u8], &'static mut [u8]) {
     let psram = Psram::new(psram, Default::default());
     let (start, size) = psram.raw_parts();
-    let reserve = reserve.next_multiple_of(64).min(size);
+    let total = (2 * frame_bytes).next_multiple_of(64).min(size);
+    println!("psram: start={:p} size={size}", start);
     unsafe {
-        if size > reserve {
+        if size > total {
             esp_alloc::HEAP.add_region(esp_alloc::HeapRegion::new(
-                start.add(reserve),
-                size - reserve,
+                start.add(total),
+                size - total,
                 esp_alloc::MemoryCapability::External.into(),
             ));
         }
-        core::slice::from_raw_parts_mut(start, reserve)
+        core::slice::from_raw_parts_mut(start, total).split_at_mut(frame_bytes)
     }
 }

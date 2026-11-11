@@ -80,8 +80,12 @@ Panel timing is Espressif's `SUB_BOARD3_800_480_PANEL_35HZ_RGB_TIMING`
 ## Project layout
 
 - `src/bin/main.rs` — startup (heap, PSRAM split, esp-rtos), display init,
-  Wi-Fi + embassy-net, refresh loop (fetch → draw → 30 min sleep, retry after
-  30 s on failure).
+  Wi-Fi + embassy-net, refresh loop (fetch → draw → animate → 30 min sleep,
+  retry after 30 s on failure).
+- `src/bin/display-test.rs` — display hardware test: renders a forced storm
+  scene (the heaviest animation load) and animates it forever with
+  heartbeats on serial. If the panel shows nothing here, the problem is
+  hardware (power, cable, panel), not the app.
 - `src/display.rs` — the reference board library's LCD driver, copied
   verbatim: PSRAM frame buffer scanned out by a self-reloading DMA descriptor
   ring; drawing becomes visible after `present()` writes the touched rows
@@ -89,7 +93,7 @@ Panel timing is Espressif's `SUB_BOARD3_800_480_PANEL_35HZ_RGB_TIMING`
   stream if the panel loses sync.
 - `src/weather.rs` — Open-Meteo URLs (plain HTTP; no TLS needed) and minimal
   JSON extraction for `current`: `temperature_2m`, `weather_code`,
-  `precipitation`, `uv_index`; city → lat/lon via the geocoding API.
+  `precipitation`, `uv_index`, `is_day`; city → lat/lon via the geocoding API.
 - `src/advice.rs` — outfit/rain/snow/UV rules from the project plan.
 - `src/ui.rs` — screen layout with `embedded-graphics`.
 - `src/scene.rs` — animated weather backdrop (phone-weather-app style): a static
