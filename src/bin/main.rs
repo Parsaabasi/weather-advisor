@@ -106,13 +106,9 @@ async fn main(spawner: Spawner) -> ! {
 
     {
         let mut scene = scene::Scene::new(None, &mut base, rng.random());
-        scene.draw(
-            &mut display,
-            CITY,
-            scene::Overlay::Message("Starting up..."),
-        );
+        scene.render(CITY, scene::Overlay::Message("Starting up..."));
+        reveal(&mut display, &mut scene).await;
     }
-    let _ = display.present().await;
 
     // --- Wi-Fi + network stack ---
     log::info!("Starting Wi-Fi ({WIFI_SSID})");
@@ -177,8 +173,8 @@ async fn main(spawner: Spawner) -> ! {
                     w.uv_tenths as f32 / 10.0
                 );
                 let mut scene = scene::Scene::new(Some(&w), &mut base, rng.random());
-                scene.draw(&mut display, CITY, scene::Overlay::Weather(&w));
-                let _ = display.present().await;
+                scene.render(CITY, scene::Overlay::Weather(&w));
+                reveal(&mut display, &mut scene).await;
                 animate_for(&mut display, &mut scene, REFRESH_PERIOD).await;
             }
             Ok(Err(e)) => {
@@ -196,6 +192,19 @@ async fn main(spawner: Spawner) -> ! {
 enum Step {
     Location(weather::Location),
     Weather(weather::Weather),
+}
+
+/// Reveals a rendered scene onto the panel band by band: one band per frame,
+/// each write-back small enough to fit into the vertical blanking window, so
+/// the scan-out stream is never starved (and thus never needs a restart).
+async fn reveal(display: &mut display::Display<'_>, scene: &mut scene::Scene<'_>) {
+    for step in 0..scene::REVEAL_STEPS {
+        {
+            let mut canvas = display.canvas();
+            scene.reveal_step(&mut canvas, step);
+        }
+        let _ = display.present().await;
+    }
 }
 
 /// Animates the scene (rain/snow/lightning) until `total` has elapsed, then
@@ -231,8 +240,8 @@ async fn show_failure(
 ) {
     log::warn!("{message}");
     let mut scene = scene::Scene::error(base, seed);
-    scene.draw(display, CITY, scene::Overlay::Message(message));
-    let _ = display.present().await;
+    scene.render(CITY, scene::Overlay::Message(message));
+    reveal(display, &mut scene).await;
     Timer::after(RETRY_PERIOD).await;
 }
 

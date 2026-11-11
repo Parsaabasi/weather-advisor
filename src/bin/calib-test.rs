@@ -142,7 +142,8 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
 
     loop {
         Timer::after_secs(10).await;
-        println!("heartbeat");
+        let (pos, reference) = display.debug_pos();
+        println!("heartbeat, dma pos {pos}, ref {reference:?}");
     }
 }
 

@@ -57,11 +57,17 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         is_day: true,
     };
     let mut scene = scene::Scene::new(Some(&storm), base, 0x1234_5678);
-    scene.draw(&mut display, "TEST", scene::Overlay::Weather(&storm));
-    println!("storm scene drawn, animating");
-    let _ = display.present().await;
+    scene.render("TEST", scene::Overlay::Weather(&storm));
+    println!("storm scene rendered, revealing");
+    for step in 0..scene::REVEAL_STEPS {
+        {
+            let mut canvas = display.canvas();
+            scene.reveal_step(&mut canvas, step);
+        }
+        let _ = display.present().await;
+    }
+    println!("revealed, animating");
 
-    let mut beats = 0u32;
     let mut frames = 0u32;
     loop {
         frames += 1;
@@ -72,17 +78,14 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
             scene.tick(&mut canvas);
         }
         let result = display.present().await;
-        beats = frames / 105;
         match result {
             Ok(()) if frames % 105 == 0 => {
                 let (pos, reference) = display.debug_pos();
                 println!("frame {frames}: present ok, dma pos {pos}, ref {reference:?}");
+                println!("heartbeat {} (3 s of animation)", frames / 105);
             }
             Err(e) => println!("frame {frames}: present FAILED: {e:?}"),
             Ok(()) => {}
-        }
-        if frames % 105 == 0 {
-            println!("heartbeat {} (3 s of animation)", beats);
         }
     }
 }

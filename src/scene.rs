@@ -18,7 +18,7 @@ use embedded_graphics::{
 use heapless::Vec as HVec;
 
 use crate::{
-    display::{Canvas, HEIGHT, WIDTH},
+    display::{Canvas, DirtyChunks, HEIGHT, WIDTH},
     ui,
     weather::Weather,
 };
@@ -138,18 +138,30 @@ struct Particle {
     v: i32,
 }
 
-/// An animated weather scene over a base copy of the frame.
+/// An animated weather scene. The static scene is rendered OFF-SCREEN into
+/// the `base` buffer; [`Scene::reveal_step`] then copies it onto the panel a
+/// band at a time (each step's write-back fits into the vertical blanking
+/// window, so the scan-out stream is never disturbed and never needs a
+/// restart — a mid-run restart is not reliable on this board). Particles are
+/// animated on top of the revealed scene, restoring whatever was under them
+/// from the same base buffer.
 pub struct Scene<'a> {
     kind: Kind,
-    /// Copy of the frame as drawn (background + decorations + text); used to
-    /// restore the area under moving particles.
+    /// Off-screen copy of the fully rendered scene; also the source for
+    /// restoring the area under moving particles.
     base: &'a mut [u8],
+    /// Scratch dirty map for off-screen rendering into `base`.
+    scratch: DirtyChunks,
     particles: HVec<Particle, MAX_PARTICLES>,
     rng: u32,
     tick: u32,
     /// Lightning bolt being flashed: (x, y, ticks left).
     bolt: Option<(i32, i32, u8)>,
 }
+
+/// Number of reveal steps: each copies `HEIGHT / REVEAL_STEPS` rows
+/// (~96 KB) onto the panel per frame.
+pub const REVEAL_STEPS: usize = 8;
 
 impl<'a> Scene<'a> {
     /// Builds the scene for `weather`, or a neutral boot scene when `None`.
@@ -173,6 +185,7 @@ impl<'a> Scene<'a> {
         let mut scene = Scene {
             kind,
             base,
+            scratch: crate::display::DirtyChunks::new(),
             particles: HVec::new(),
             rng: seed | 1,
             tick: 0,
@@ -209,39 +222,39 @@ impl<'a> Scene<'a> {
         !self.particles.is_empty() || self.kind == Kind::Storm
     }
 
-    /// Renders the whole static scene into the frame buffer, then snapshots
-    /// it into the base buffer for particle restoration.
-    pub fn draw(
-        &mut self,
-        display: &mut crate::display::Display<'_>,
-        city: &str,
-        overlay: Overlay<'_>,
-    ) {
-        {
-            let mut canvas = display.canvas();
-            self.draw_sky(&mut canvas);
-            self.draw_decorations(&mut canvas);
-            ui::draw_panel(&mut canvas, city);
-            match overlay {
-                Overlay::Message(message) => {
-                    if self.kind == Kind::Boot {
-                        ui::draw_boot_message(&mut canvas, message);
-                    } else {
-                        ui::draw_error_texts(&mut canvas, message);
-                    }
+    /// Renders the whole static scene into the off-screen base buffer.
+    pub fn render(&mut self, city: &str, overlay: Overlay<'_>) {
+        let kind = self.kind;
+        let seed = self.rng;
+        let base: &mut [u8] = &mut *self.base;
+        let dirty = &mut self.scratch;
+        let mut canvas = crate::display::Canvas::from_parts(base, dirty);
+        Self::draw_sky(kind, &mut canvas);
+        Self::draw_decorations(kind, seed, &mut canvas);
+        ui::draw_panel(&mut canvas, city);
+        match overlay {
+            Overlay::Message(message) => {
+                if kind == Kind::Boot {
+                    ui::draw_boot_message(&mut canvas, message);
+                } else {
+                    ui::draw_error_texts(&mut canvas, message);
                 }
-                Overlay::Weather(w) => ui::draw_weather_content(&mut canvas, w),
             }
+            Overlay::Weather(w) => ui::draw_weather_content(&mut canvas, w),
         }
-        let frame = display.framebuffer();
-        self.base.copy_from_slice(&frame[..self.base.len()]);
-        // The base is read back later (particle restore) long after the cache
-        // has evicted these lines, so it must be flushed to PSRAM now.
-        crate::display::writeback(self.base);
     }
 
-    fn draw_sky(&self, canvas: &mut Canvas<'_>) {
-        let (top, bottom) = self.kind.sky();
+    /// Copies the `step`-th horizontal band of the rendered scene onto the
+    /// panel (call once per frame for `step` in `0..REVEAL_STEPS`, then
+    /// `present()`); the band's write-back fits into the blanking window.
+    pub fn reveal_step(&mut self, canvas: &mut Canvas<'_>, step: usize) {
+        let band = (HEIGHT + REVEAL_STEPS - 1) / REVEAL_STEPS;
+        let y = step * band;
+        canvas.restore(self.base, 0, y, WIDTH, band);
+    }
+
+    fn draw_sky(kind: Kind, canvas: &mut Canvas<'_>) {
+        let (top, bottom) = kind.sky();
         let (tr, tg, tb) = top;
         let (br, bg, bb) = bottom;
         let top = Rgb565::new(tr, tg, tb);
@@ -257,8 +270,7 @@ impl<'a> Scene<'a> {
         }
     }
 
-    fn draw_decorations(&self, canvas: &mut Canvas<'_>) {
-        let kind = self.kind;
+    fn draw_decorations(kind: Kind, seed: u32, canvas: &mut Canvas<'_>) {
         if kind.has_sun() {
             Circle::new(Point::new(640, 105), 40)
                 .into_styled(PrimitiveStyle::with_fill(Rgb565::new(31, 62, 8)))
@@ -275,13 +287,13 @@ impl<'a> Scene<'a> {
                 .into_styled(PrimitiveStyle::with_fill(Rgb565::new(28, 60, 24)))
                 .draw(canvas)
                 .ok();
-            let (sr, sg, sb) = self.kind.sky().0;
+            let (sr, sg, sb) = kind.sky().0;
             Circle::new(Point::new(638, 92), 30)
                 .into_styled(PrimitiveStyle::with_fill(Rgb565::new(sr, sg, sb)))
                 .draw(canvas)
                 .ok();
             // Stars: small dots scattered over the upper sky.
-            let mut rng = self.rng;
+            let mut rng = seed;
             for _ in 0..40 {
                 rng ^= rng << 13;
                 rng ^= rng >> 17;

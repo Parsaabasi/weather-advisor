@@ -75,12 +75,12 @@ const BITMAP_WORDS: usize = (HEIGHT * CHUNK_COLS + 63) / 64;
 /// Writing back only touched chunks keeps the PSRAM traffic of small frame
 /// updates (e.g. animation particles) inside the vertical blanking window,
 /// where it cannot compete with the continuous scan-out for bandwidth.
-struct DirtyChunks {
+pub(crate) struct DirtyChunks {
     bits: [u64; BITMAP_WORDS],
 }
 
 impl DirtyChunks {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self { bits: [0; BITMAP_WORDS] }
     }
 
@@ -487,9 +487,14 @@ impl<'d> Display<'d> {
             }
         };
         if vsync.is_err() {
-            // A frame takes 28-42 ms; without VSYNC the LCD has stopped.
-            log::warn!(
-                "display: no VSYNC within {} ms, restarting",
+            // A frame takes 28-42 ms; without VSYNC the LCD has stopped. A
+            // restart is the only recovery — note that on this board a
+            // mid-run restart has proven unreliable (the panel came back
+            // dark or rotated), so this path should never be reached in
+            // normal operation; the point of the budgeted writes elsewhere
+            // is to never starve the stream in the first place.
+            log::error!(
+                "display: no VSYNC within {} ms, restarting as last resort",
                 VSYNC_TIMEOUT.as_millis()
             );
             self.flush_dirty();
@@ -511,8 +516,14 @@ impl<'d> Display<'d> {
         self.flush_dirty();
 
         if drifted {
+            // Do NOT restart: on this board a mid-run restart leaves the
+            // panel dark or rotated (the restart phase is not deterministic,
+            // and a sub-chunk residual offset is invisible to this check).
+            // Log it and keep the stream running; the callers keep the PSRAM
+            // traffic per frame inside the blanking window so that drift
+            // should not occur at all.
             self.note_resync();
-            return self.restart();
+            log::error!("display: stream drifted (pos {position}); keeping stream running");
         }
         Ok(())
     }
@@ -620,7 +631,14 @@ pub struct Canvas<'a> {
     dirty: &'a mut DirtyChunks,
 }
 
-impl Canvas<'_> {
+impl<'a> Canvas<'a> {
+    /// Crate-internal constructor for off-screen rendering into a buffer with
+    /// the frame-buffer layout (the scene renderer draws into its base
+    /// buffer this way); the dirty map is only scratch there.
+    pub(crate) fn from_parts(buf: &'a mut [u8], dirty: &'a mut DirtyChunks) -> Self {
+        Self { buf, dirty }
+    }
+
     fn mark(&mut self, x: usize, y: usize, w: usize, h: usize) {
         self.dirty.mark(x, y, w, h);
     }
