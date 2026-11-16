@@ -88,6 +88,7 @@ async fn main(spawner: Spawner) -> ! {
         framebuffer = fb;
         base = scene_base;
     }
+    let fb_addr = framebuffer.as_ptr() as usize;
     let rng = esp_hal::rng::Rng::new();
     let mut display = match display::Display::new(
         peripherals.LCD_CAM,
@@ -175,7 +176,24 @@ async fn main(spawner: Spawner) -> ! {
                 let mut scene = scene::Scene::new(Some(&w), &mut base, rng.random());
                 scene.render(CITY, scene::Overlay::Weather(&w));
                 reveal(&mut display, &mut scene).await;
-                animate_for(&mut display, &mut scene, REFRESH_PERIOD).await;
+                loop {
+                    if !animate_for(&mut display, &mut scene, REFRESH_PERIOD).await {
+                        break;
+                    }
+                    // Persistent drift: rebuild the display from scratch (a
+                    // boot-like start is the only reliable realignment on
+                    // this board), then re-reveal the current scene.
+                    log::warn!("display: rebuilding after persistent drift");
+                    display = match rebuild_display(fb_addr) {
+                        Ok(display) => display,
+                        Err(e) => {
+                            log::error!("display re-init failed: {e:?}");
+                            Timer::after_secs(60).await;
+                            continue;
+                        }
+                    };
+                    reveal(&mut display, &mut scene).await;
+                }
             }
             Ok(Err(e)) => {
                 show_failure(&mut display, &mut base, rng.random(), &format!("Fetch failed: {e:?}"))
@@ -208,7 +226,8 @@ async fn reveal(display: &mut display::Display<'_>, scene: &mut scene::Scene<'_>
 }
 
 /// Animates the scene (rain/snow/lightning) until `total` has elapsed, then
-/// returns so the caller can refresh the weather.
+/// returns `false`; returns `true` early when drift turns out to be
+/// persistent (the caller rebuilds the display).
 ///
 /// `present()` runs on EVERY frame (VSYNC-paced), as the display driver's
 /// drift detection expects; the scene is ticked only on every third frame
@@ -217,7 +236,7 @@ async fn animate_for(
     display: &mut display::Display<'_>,
     scene: &mut scene::Scene<'_>,
     total: Duration,
-) {
+) -> bool {
     let deadline = Instant::now() + total;
     let mut frames: u32 = 0;
     while Instant::now() < deadline {
@@ -227,7 +246,28 @@ async fn animate_for(
             scene.tick(&mut canvas);
         }
         let _ = display.present().await;
+        if display.drift_streak() >= 5 {
+            log::error!("display: drift is persistent, requesting rebuild");
+            return true;
+        }
     }
+    false
+}
+
+/// Re-creates the display from freshly stolen peripherals — a boot-like
+/// start, the only reliable stream (re)alignment on this board. The frame
+/// buffer contents do not survive this (the new display clears them), so
+/// the caller re-reveals the current scene afterwards.
+fn rebuild_display(fb_addr: usize) -> Result<display::Display<'static>, display::DisplayError> {
+    let peripherals = unsafe { esp_hal::peripherals::Peripherals::steal() };
+    let framebuffer =
+        unsafe { core::slice::from_raw_parts_mut(fb_addr as *mut u8, display::FRAME_BYTES) };
+    display::Display::new(
+        peripherals.LCD_CAM,
+        peripherals.DMA_AXI_CH0,
+        lcd_pins!(peripherals),
+        framebuffer,
+    )
 }
 
 /// Draws the failure scene (so partial draws never become visible), then

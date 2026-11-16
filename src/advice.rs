@@ -8,7 +8,7 @@ use crate::weather::Weather;
 /// Outfit advice for the current temperature, in tenths of °C.
 pub fn outfit(temp_tenths: i16) -> &'static str {
     match temp_tenths {
-        ..0 => "Heavy coat, warm layers, gloves, hat",
+        ..0 => "Heavy coat, gloves, hat",
         0..=99 => "Warm coat",
         100..=159 => "Lighter coat or jacket",
         160..=219 => "Light jacket or cardigan",
@@ -19,9 +19,9 @@ pub fn outfit(temp_tenths: i16) -> &'static str {
 /// Rain/snow advice: `None` means nothing worth mentioning.
 pub fn rain_snow(weather: &Weather) -> Option<&'static str> {
     match weather.code {
-        66 | 67 => Some("Freezing rain: slippery surfaces!"),
-        71..=77 | 85 | 86 => Some("Snow: warm coat + waterproof shoes"),
-        65 | 82 => Some("Heavy rain: umbrella + rain jacket"),
+        66 | 67 => Some("Freezing rain: slippery!"),
+        71..=77 | 85 | 86 => Some("Snow: coat + waterproof shoes"),
+        65 | 82 => Some("Heavy rain: umbrella + jacket"),
         51..=64 | 80 | 81 => Some("Take an umbrella"),
         _ if weather.precip_tenths > 0 => Some("Rain now: take an umbrella"),
         _ => None,
@@ -64,7 +64,7 @@ mod tests {
 
     #[test]
     fn outfit_bands() {
-        assert_eq!(outfit(-10), "Heavy coat, warm layers, gloves, hat");
+        assert_eq!(outfit(-10), "Heavy coat, gloves, hat");
         assert_eq!(outfit(0), "Warm coat");
         assert_eq!(outfit(95), "Warm coat");
         assert_eq!(outfit(100), "Lighter coat or jacket");
@@ -76,12 +76,12 @@ mod tests {
 
     #[test]
     fn rain_snow_rules() {
-        assert_eq!(rain_snow(&w(20, 66, 0, 0)), Some("Freezing rain: slippery surfaces!"));
-        assert_eq!(rain_snow(&w(20, 67, 0, 0)), Some("Freezing rain: slippery surfaces!"));
-        assert_eq!(rain_snow(&w(20, 73, 0, 0)), Some("Snow: warm coat + waterproof shoes"));
-        assert_eq!(rain_snow(&w(20, 86, 0, 0)), Some("Snow: warm coat + waterproof shoes"));
-        assert_eq!(rain_snow(&w(20, 65, 0, 0)), Some("Heavy rain: umbrella + rain jacket"));
-        assert_eq!(rain_snow(&w(20, 82, 0, 0)), Some("Heavy rain: umbrella + rain jacket"));
+        assert_eq!(rain_snow(&w(20, 66, 0, 0)), Some("Freezing rain: slippery!"));
+        assert_eq!(rain_snow(&w(20, 67, 0, 0)), Some("Freezing rain: slippery!"));
+        assert_eq!(rain_snow(&w(20, 73, 0, 0)), Some("Snow: coat + waterproof shoes"));
+        assert_eq!(rain_snow(&w(20, 86, 0, 0)), Some("Snow: coat + waterproof shoes"));
+        assert_eq!(rain_snow(&w(20, 65, 0, 0)), Some("Heavy rain: umbrella + jacket"));
+        assert_eq!(rain_snow(&w(20, 82, 0, 0)), Some("Heavy rain: umbrella + jacket"));
         assert_eq!(rain_snow(&w(20, 61, 0, 0)), Some("Take an umbrella"));
         assert_eq!(rain_snow(&w(20, 0, 5, 0)), Some("Rain now: take an umbrella"));
         assert_eq!(rain_snow(&w(20, 2, 0, 0)), None);

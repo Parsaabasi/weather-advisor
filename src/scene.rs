@@ -25,9 +25,11 @@ use crate::{
 
 /// Maximum particles animated at once (rain drops or snow flakes).
 const MAX_PARTICLES: usize = 96;
-/// Rain streak geometry (width × length in pixels).
+/// Rain streak geometry (width × length in pixels). Kept short so a whole
+/// animation tick's write-back (~40 drops × 2 cells × 8 chunks × 64 B ≈
+/// 41 KB) fits into the vertical blanking window.
 const RAIN_W: usize = 2;
-const RAIN_H: usize = 13;
+const RAIN_H: usize = 8;
 /// Snow flake geometry (square side in pixels).
 const SNOW_S: usize = 3;
 /// Animation period; ~12.5 ticks per second.
@@ -160,8 +162,8 @@ pub struct Scene<'a> {
 }
 
 /// Number of reveal steps: each copies `HEIGHT / REVEAL_STEPS` rows
-/// (~96 KB) onto the panel per frame.
-pub const REVEAL_STEPS: usize = 8;
+/// (~48 KB) onto the panel per frame, inside the blanking window.
+pub const REVEAL_STEPS: usize = 16;
 
 impl<'a> Scene<'a> {
     /// Builds the scene for `weather`, or a neutral boot scene when `None`.
@@ -192,9 +194,9 @@ impl<'a> Scene<'a> {
             bolt: None,
         };
         let count = match kind.particle_color() {
-            Some(_) if kind == Kind::HeavyRain || kind == Kind::Storm => 48,
+            Some(_) if kind == Kind::HeavyRain || kind == Kind::Storm => 32,
             Some(_) if kind.is_snow() => 40,
-            Some(_) => 40,
+            Some(_) => 32,
             None => 0,
         };
         for _ in 0..count {

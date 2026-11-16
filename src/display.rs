@@ -332,6 +332,8 @@ pub struct Display<'d> {
     framebuffer: *mut u8,
     /// Chunks of the frame buffer written since the last `present`.
     dirty: DirtyChunks,
+    /// Consecutive presents that detected drift (reset by a clean one).
+    drift_streak: u32,
 }
 
 impl<'d> Display<'d> {
@@ -435,6 +437,7 @@ impl<'d> Display<'d> {
             last_drift_log: Instant::now(),
             framebuffer,
             dirty: DirtyChunks::new(),
+            drift_streak: 0,
         })
     }
 
@@ -519,13 +522,22 @@ impl<'d> Display<'d> {
             // Do NOT restart: on this board a mid-run restart leaves the
             // panel dark or rotated (the restart phase is not deterministic,
             // and a sub-chunk residual offset is invisible to this check).
-            // Log it and keep the stream running; the callers keep the PSRAM
-            // traffic per frame inside the blanking window so that drift
-            // should not occur at all.
+            // Log it and keep the stream running; the caller watches
+            // [`Self::drift_streak`] and rebuilds the display from scratch
+            // when the drift turns out to be persistent.
+            self.drift_streak += 1;
             self.note_resync();
             log::error!("display: stream drifted (pos {position}); keeping stream running");
+        } else {
+            self.drift_streak = 0;
         }
         Ok(())
+    }
+
+    /// Number of consecutive presents that detected drift (reset by a clean
+    /// present). The caller rebuilds the display when this grows persistently.
+    pub fn drift_streak(&self) -> u32 {
+        self.drift_streak
     }
 
     /// Writes the frame-buffer chunks touched since the last call back to
@@ -587,8 +599,8 @@ impl<'d> Display<'d> {
     }
 
     /// Realigns the stream with the screen (see the module docs); the panel
-    /// blinks once. [`Self::present`] already does this whenever it detects
-    /// drift, so this is only needed to force it.
+    /// blinks once. NOTE: on this board a mid-run restart has proven
+    /// unreliable — prefer letting the caller rebuild the display instead.
     pub async fn resync(&mut self) -> Result<(), DisplayError> {
         if let Scanout::Running(transfer) = &mut self.scanout {
             let _ = with_timeout(VSYNC_TIMEOUT, transfer.wait_for_vsync()).await;
